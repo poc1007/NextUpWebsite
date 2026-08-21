@@ -21,10 +21,12 @@
       <h1>NextUp Admin</h1>
       <p class="lead">Sign in with the approved administrator account to view system health, fingerprint processing and support requests.</p>
       <form id="login-form">
-        <label>Email<input required name="email" type="email" autocomplete="username" placeholder="Approved administrator email"></label>
-        <label>Password<input required name="password" type="password" autocomplete="current-password"></label>
-        <button class="button" type="submit">Sign in</button>
-        <p id="login-result" class="hint" aria-live="polite"></p>
+        <label>Email<input required name="email" type="email" autocomplete="username" placeholder="you@example.com"></label>
+        <label>Password
+          <span class="password-field"><input id="admin-password" required name="password" type="password" autocomplete="current-password"><button id="toggle-password" class="text-button password-toggle" type="button" aria-controls="admin-password" aria-pressed="false">Show</button></span>
+        </label>
+        <p id="login-result" class="hint" role="alert" aria-live="assertive"></p>
+        <button id="sign-in-button" class="button" type="submit">Sign in</button>
       </form>
     </section>
 
@@ -68,7 +70,7 @@
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th scope="col">TMDB ID</th><th scope="col">Status</th><th scope="col">Priority</th><th scope="col">Attempts</th><th scope="col">Requested</th><th scope="col">Latest activity</th><th scope="col">Error</th></tr></thead>
+            <thead><tr><th scope="col">Show</th><th scope="col">Status</th><th scope="col">Priority</th><th scope="col">Attempts</th><th scope="col">Requested</th><th scope="col">Latest activity</th><th scope="col">Error</th></tr></thead>
             <tbody id="jobs-list"></tbody>
           </table>
         </div>
@@ -94,6 +96,11 @@
     <div id="job-detail-content"></div>
   </dialog>
 
+  <dialog id="support-detail" class="job-detail support-detail">
+    <div class="dialog-header"><h2>Support request</h2><button id="close-support-detail" class="button secondary" type="button">Close</button></div>
+    <div id="support-detail-content"></div>
+  </dialog>
+
   <footer class="site-footer"><div class="footer-content"><span>NextUp</span><span>Private administration dashboard</span></div></footer>
 
   <script src="../assets/config.js"></script>
@@ -103,12 +110,13 @@
     const supabase = createClient(NextUpSupportConfig.supabaseUrl, NextUpSupportConfig.publishableKey, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false }
     });
-    const state = { jobsPage: 0, jobsTotal: 0, supportPage: 0, supportTotal: 0, refreshTimer: null, isStarting: false, isSigningOut: false };
+    const state = { jobsPage: 0, jobsTotal: 0, supportPage: 0, supportTotal: 0, refreshTimer: null, isStarting: false, isSigningOut: false, isSigningIn: false, activeSupportRequestID: null };
     const $ = selector => document.querySelector(selector);
     const loginCard = $('#login-card');
     const dashboard = $('#dashboard');
     const errorBanner = $('#dashboard-error');
     const detailDialog = $('#job-detail');
+    const supportDetailDialog = $('#support-detail');
     const dateTime = value => value ? new Date(value).toLocaleString() : '—';
     const age = minutes => minutes === null || minutes === undefined ? 'No pending jobs' : `${minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`}`;
     const setText = (selector, value) => $(selector).textContent = value;
@@ -130,7 +138,7 @@
         ['Failed', row.failed_jobs, 'Need attention'],
         ['Last hour', row.completed_last_hour, 'Jobs completed'],
         ['Oldest pending', age(row.oldest_pending_minutes), row.oldest_pending_at ? dateTime(row.oldest_pending_at) : 'Nothing waiting'],
-        ['Unanswered support', row.unanswered_support_requests, 'New or in progress'],
+        ['Unresolved support', row.unanswered_support_requests, `${text(row.new_support_requests, '0')} new · ${text(row.in_progress_support_requests, '0')} in progress`],
         ['Support in 24h', row.support_requests_last_24_hours, 'Recently received']
       ];
       const container = $('#overview-cards');
@@ -161,9 +169,9 @@
       state.jobsTotal = Number(rows[0]?.total_count || 0);
       if (!rows.length) { const row = document.createElement('tr'); const cell = document.createElement('td'); cell.colSpan = 7; cell.textContent = 'No jobs match these filters.'; row.append(cell); body.append(row); }
       rows.forEach(job => {
-        const row = document.createElement('tr'); row.className = 'selectable-row'; row.tabIndex = 0; row.setAttribute('aria-label', `View TMDB ${job.tmdb_id} fingerprint job details`);
-        const cells = [job.tmdb_id, null, job.priority, job.attempt_count, dateTime(job.requested_at), dateTime(job.completed_at || job.started_at || job.updated_at), job.error_code || '—'];
-        cells.forEach((value, index) => { const cell = document.createElement('td'); if (index === 1) cell.append(statusTag(job.status)); else cell.textContent = text(value); row.append(cell); });
+        const row = document.createElement('tr'); row.className = 'selectable-row'; row.tabIndex = 0; row.setAttribute('aria-label', `View ${job.show_title || `TMDB ${job.tmdb_id}`} fingerprint job details`);
+        const cells = [null, null, job.priority, job.attempt_count, dateTime(job.requested_at), dateTime(job.completed_at || job.started_at || job.updated_at), job.error_code || '—'];
+        cells.forEach((value, index) => { const cell = document.createElement('td'); if (index === 0) { const title = document.createElement('strong'); title.textContent = job.show_title || 'Show title unavailable'; const identifier = document.createElement('span'); identifier.className = 'table-subtitle'; identifier.textContent = `TMDB ${job.tmdb_id}`; cell.append(title, identifier); } else if (index === 1) cell.append(statusTag(job.status)); else cell.textContent = text(value); row.append(cell); });
         const open = () => loadJobDetail(job.id); row.addEventListener('click', open); row.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } }); body.append(row);
       });
       const pageCount = Math.max(1, Math.ceil(state.jobsTotal / 50));
@@ -180,7 +188,7 @@
         if (!data) { container.textContent = 'This job is no longer available.'; detailDialog.showModal(); return; }
         const fingerprint = data.fingerprint || {}; const job = data.job || {};
         const summary = document.createElement('div'); summary.className = 'detail-grid';
-        [['TMDB ID', job.tmdb_id], ['Job status', job.status], ['Priority', job.priority], ['Attempts', job.attempt_count], ['Requested', dateTime(job.requested_at)], ['Last error', job.error_code], ['Fingerprint status', fingerprint.status], ['Usable fingerprint', fingerprint.usable ? 'Yes' : 'No'], ['Attributes', fingerprint.attribute_count], ['Genres', fingerprint.genre_count], ['Themes and keywords', fingerprint.keyword_count], ['Last success', dateTime(fingerprint.last_successful_run)]].forEach(([label, value]) => addDetailBlock(summary, label, value));
+        [['Show', job.show_title || 'Show title unavailable'], ['TMDB ID', job.tmdb_id], ['Job status', job.status], ['Priority', job.priority], ['Attempts', job.attempt_count], ['Requested', dateTime(job.requested_at)], ['Last error', job.error_code], ['Fingerprint status', fingerprint.status], ['Usable fingerprint', fingerprint.usable ? 'Yes' : 'No'], ['Attributes', fingerprint.attribute_count], ['Genres', fingerprint.genre_count], ['Themes and keywords', fingerprint.keyword_count], ['Last success', dateTime(fingerprint.last_successful_run)]].forEach(([label, value]) => addDetailBlock(summary, label, value));
         const availability = document.createElement('pre'); availability.className = 'detail-json'; availability.textContent = JSON.stringify(fingerprint.dimension_availability || {}, null, 2);
         const availabilityHeading = document.createElement('h3'); availabilityHeading.textContent = 'Dimensions present';
         const historyHeading = document.createElement('h3'); historyHeading.textContent = 'Recent job history';
@@ -195,14 +203,12 @@
       const list = $('#support-list'); list.replaceChildren(); state.supportTotal = Number(rows[0]?.total_count || 0);
       if (!rows.length) { const empty = document.createElement('p'); empty.className = 'hint'; empty.textContent = 'No support requests match these filters.'; list.append(empty); }
       rows.forEach(request => {
-        const card = document.createElement('article'); card.className = 'request-card';
-        const top = document.createElement('div'); top.className = 'request-top'; const title = document.createElement('h3'); title.textContent = request.subject; top.append(title, statusTag(request.status));
-        const meta = document.createElement('p'); meta.className = 'meta'; meta.textContent = `${request.name}${request.reply_email ? ` · ${request.reply_email}` : ''} · ${dateTime(request.created_at)}`;
-        const message = document.createElement('p'); message.className = 'message'; message.textContent = request.message;
-        const context = document.createElement('p'); context.className = 'meta'; context.textContent = [request.category, request.device_model, request.ios_version, request.app_version, request.screen].filter(Boolean).join(' · ');
-        card.append(top, meta, message);
-        [['Expected', request.expected_result], ['Actual', request.actual_result], ['Error', request.error_message], ['Admin note', request.admin_note]].forEach(([label, value]) => { if (value) { const line = document.createElement('p'); const strong = document.createElement('strong'); strong.textContent = `${label}: `; line.append(strong, document.createTextNode(value)); card.append(line); } });
-        if (context.textContent) card.append(context); list.append(card);
+        const card = document.createElement('article'); card.className = 'request-card compact-request'; card.tabIndex = 0;
+        card.setAttribute('aria-label', `Open support request: ${request.subject}`);
+        const top = document.createElement('div'); top.className = 'request-top'; const title = document.createElement('h3'); title.textContent = request.subject || 'Untitled support request'; top.append(title, statusTag(request.status));
+        const meta = document.createElement('p'); meta.className = 'meta'; meta.textContent = `Contact: ${request.reply_email || request.name || 'Not supplied'} · Submitted ${dateTime(request.created_at)} · Updated ${dateTime(request.updated_at)}`;
+        const open = () => loadSupportDetail(request.id); card.addEventListener('click', open); card.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } });
+        card.append(top, meta); list.append(card);
       });
       const pageCount = Math.max(1, Math.ceil(state.supportTotal / 50));
       setText('#support-page', `Page ${state.supportPage + 1} of ${pageCount} · ${state.supportTotal} requests`);
@@ -210,13 +216,50 @@
       setText('#support-summary', state.supportTotal ? `${state.supportTotal} request${state.supportTotal === 1 ? '' : 's'} found.` : 'No support requests match these filters.');
     }
 
+    function addSupportSection(container, headingText) { const heading = document.createElement('h3'); heading.textContent = headingText; container.append(heading); return heading; }
+    function addSupportLine(container, label, value) { if (!value) return; const line = document.createElement('p'); const strong = document.createElement('strong'); strong.textContent = `${label}: `; line.append(strong, document.createTextNode(value)); container.append(line); }
+    function renderSupportDetail(data) {
+      const container = $('#support-detail-content'); container.replaceChildren();
+      const request = data?.request;
+      if (!request) { container.textContent = 'This support request is no longer available.'; return; }
+      const title = document.createElement('h3'); title.className = 'support-subject'; title.textContent = request.subject || 'Untitled support request';
+      const meta = document.createElement('p'); meta.className = 'meta'; meta.textContent = `Contact: ${request.reply_email || request.name || 'Not supplied'} · Submitted ${dateTime(request.created_at)} · Last updated ${dateTime(request.updated_at)}`;
+      const messageHeading = addSupportSection(container, 'Original message'); const message = document.createElement('p'); message.className = 'message'; message.textContent = request.message || 'No message supplied.';
+      const details = document.createElement('div'); details.className = 'detail-grid support-request-details';
+      [['Category', request.category], ['Device', request.device_model], ['iOS', request.ios_version], ['App version', request.app_version], ['Screen', request.screen], ['Error message', request.error_message]].forEach(([label, value]) => { if (value) addDetailBlock(details, label, value); });
+      container.append(title, meta, messageHeading, message); if (details.children.length) container.append(details);
+      addSupportLine(container, 'Expected result', request.expected_result); addSupportLine(container, 'Actual result', request.actual_result); addSupportLine(container, 'Legacy admin note', request.admin_note);
+      const controlsHeading = addSupportSection(container, 'Status');
+      const controls = document.createElement('div'); controls.className = 'support-controls';
+      const label = document.createElement('label'); label.textContent = 'Change status'; const select = document.createElement('select'); select.id = 'support-detail-status'; [['new','New'],['in_progress','In progress'],['resolved','Resolved']].forEach(([value,labelText]) => { const option = document.createElement('option'); option.value = value; option.textContent = labelText; option.selected = request.status === value; select.append(option); }); label.append(select);
+      const save = document.createElement('button'); save.id = 'save-support-status'; save.className = 'button'; save.type = 'button'; save.textContent = 'Save status';
+      const feedback = document.createElement('p'); feedback.id = 'support-status-result'; feedback.className = 'hint'; feedback.setAttribute('aria-live', 'polite');
+      controls.append(label, save, feedback); container.append(controlsHeading, controls);
+      const notesHeading = addSupportSection(container, 'Internal notes');
+      const noteField = document.createElement('textarea'); noteField.id = 'support-note-body'; noteField.maxLength = 5000; noteField.placeholder = 'Add a private note for other administrators'; noteField.setAttribute('aria-label', 'Internal note');
+      const addNote = document.createElement('button'); addNote.id = 'add-support-note'; addNote.className = 'button secondary'; addNote.type = 'button'; addNote.textContent = 'Add note';
+      const noteResult = document.createElement('p'); noteResult.id = 'support-note-result'; noteResult.className = 'hint'; noteResult.setAttribute('aria-live','polite');
+      const notes = document.createElement('ul'); notes.className = 'history-list';
+      (data.notes || []).forEach(note => { const item = document.createElement('li'); item.textContent = `${note.author || 'Administrator'} · ${dateTime(note.created_at)} — ${note.body}`; notes.append(item); });
+      if (!notes.children.length) { const item = document.createElement('li'); item.textContent = 'No internal notes yet.'; notes.append(item); }
+      container.append(notesHeading, noteField, addNote, noteResult, notes);
+      const auditHeading = addSupportSection(container, 'Admin history'); const audit = document.createElement('ul'); audit.className = 'history-list';
+      (data.audit || []).forEach(entry => { const item = document.createElement('li'); const action = entry.action === 'status_changed' ? `Changed status from ${entry.previous_status || 'unknown'} to ${entry.new_status || 'unknown'}` : 'Added an internal note'; item.textContent = `${entry.administrator || 'Administrator'} · ${dateTime(entry.created_at)} — ${action}`; audit.append(item); });
+      if (!audit.children.length) { const item = document.createElement('li'); item.textContent = 'No administrative changes yet.'; audit.append(item); }
+      container.append(auditHeading, audit);
+      save.addEventListener('click', saveSupportStatus); addNote.addEventListener('click', addSupportNote);
+    }
+    async function loadSupportDetail(id, { open = true } = {}) { try { state.activeSupportRequestID = id; const data = await rpc('admin_support_request_detail', { p_request_id: id }); renderSupportDetail(data); if (open && !supportDetailDialog.open) supportDetailDialog.showModal(); } catch (error) { showError(error.message || 'Could not load support request details.'); } }
+    async function saveSupportStatus() { const button = $('#save-support-status'); const result = $('#support-status-result'); button.disabled = true; result.className = 'hint'; result.textContent = 'Saving…'; try { await rpc('admin_update_support_request_status', { p_request_id: state.activeSupportRequestID, p_status: $('#support-detail-status').value }); await Promise.all([loadSupport(), refreshOverview()]); await loadSupportDetail(state.activeSupportRequestID, { open: false }); $('#support-status-result').className = 'success'; $('#support-status-result').textContent = 'Status saved.'; } catch (error) { result.className = 'error'; result.textContent = error.message || 'Could not save the status.'; } finally { button.disabled = false; } }
+    async function addSupportNote() { const button = $('#add-support-note'); const result = $('#support-note-result'); const body = $('#support-note-body').value.trim(); if (!body) { result.className = 'error'; result.textContent = 'Enter a note before saving.'; return; } button.disabled = true; result.className = 'hint'; result.textContent = 'Saving…'; try { await rpc('admin_add_support_note', { p_request_id: state.activeSupportRequestID, p_body: body }); await Promise.all([loadSupport(), refreshOverview()]); await loadSupportDetail(state.activeSupportRequestID, { open: false }); $('#support-note-result').className = 'success'; $('#support-note-result').textContent = 'Note added.'; } catch (error) { result.className = 'error'; result.textContent = error.message || 'Could not add the note.'; } finally { button.disabled = false; } }
+
     async function loadJobs() { const rows = await rpc('admin_fingerprint_jobs', { p_status: $('#job-status').value || null, p_high_priority: $('#job-priority').checked, p_retried: $('#job-retried').checked, p_stale_minutes: $('#job-age').value ? Number($('#job-age').value) : null, p_page: state.jobsPage, p_page_size: 50 }); renderJobs(rows || []); }
     async function loadSupport() { const rows = await rpc('admin_support_requests', { p_status: $('#support-status').value || null, p_search: $('#support-search').value || null, p_page: state.supportPage, p_page_size: 50 }); renderSupport(rows || []); }
+    async function refreshOverview() { const [overview, health] = await Promise.all([rpc('admin_dashboard_overview'), rpc('admin_system_health')]); renderOverview(overview?.[0] || {}); renderHealth(health?.[0] || {}); }
     async function refreshDashboard() {
       try {
         showError('');
-        const [overview, health] = await Promise.all([rpc('admin_dashboard_overview'), rpc('admin_system_health')]);
-        renderOverview(overview?.[0] || {}); renderHealth(health?.[0] || {});
+        await refreshOverview();
         await Promise.all([loadJobs(), loadSupport()]);
         setText('#refresh-status', `Last refreshed ${new Date().toLocaleTimeString()}. Updates automatically every minute.`);
       } catch (error) {
@@ -262,8 +305,9 @@
       state.isSigningOut = false;
     }
 
-    $('#login-form').addEventListener('submit', async event => { event.preventDefault(); const values = Object.fromEntries(new FormData(event.currentTarget)); setText('#login-result', 'Signing in…'); $('#login-result').className = 'hint'; const { error } = await supabase.auth.signInWithPassword({ email: values.email, password: values.password }); if (error) { setText('#login-result', 'Sign-in failed. Please check the approved administrator credentials.'); $('#login-result').className = 'error'; return; } await startDashboard(); });
-    $('#sign-out').addEventListener('click', () => signOut()); $('#refresh').addEventListener('click', refreshDashboard); $('#close-detail').addEventListener('click', () => detailDialog.close());
+    $('#login-form').addEventListener('submit', async event => { event.preventDefault(); if (state.isSigningIn) return; state.isSigningIn = true; const form = event.currentTarget; const values = Object.fromEntries(new FormData(form)); const button = $('#sign-in-button'); button.disabled = true; button.textContent = 'Signing in…'; setText('#login-result', ''); $('#login-result').className = 'hint'; try { const { error } = await supabase.auth.signInWithPassword({ email: values.email, password: values.password }); if (error) { setText('#login-result', 'Sign-in failed. Please check the approved administrator credentials.'); $('#login-result').className = 'error'; return; } await startDashboard(); } finally { state.isSigningIn = false; button.disabled = false; button.textContent = 'Sign in'; } });
+    $('#toggle-password').addEventListener('click', () => { const input = $('#admin-password'); const visible = input.type === 'text'; input.type = visible ? 'password' : 'text'; $('#toggle-password').textContent = visible ? 'Show' : 'Hide'; $('#toggle-password').setAttribute('aria-pressed', String(!visible)); });
+    $('#sign-out').addEventListener('click', () => signOut()); $('#refresh').addEventListener('click', refreshDashboard); $('#close-detail').addEventListener('click', () => detailDialog.close()); $('#close-support-detail').addEventListener('click', () => supportDetailDialog.close());
     [['#job-status', 'change'], ['#job-age', 'change'], ['#job-priority', 'change'], ['#job-retried', 'change']].forEach(([selector, event]) => $(selector).addEventListener(event, () => { state.jobsPage = 0; loadJobs().catch(error => showError(error.message)); }));
     $('#support-status').addEventListener('change', () => { state.supportPage = 0; loadSupport().catch(error => showError(error.message)); });
     let searchTimer; $('#support-search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.supportPage = 0; loadSupport().catch(error => showError(error.message)); }, 250); });
