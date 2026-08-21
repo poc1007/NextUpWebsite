@@ -1,6 +1,242 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Support inbox · NextUp</title><link rel="stylesheet" href="../assets/site.css"></head><body>
-<header class="site-header"><div class="header-content"><a class="brand" href="../"><span class="brand-mark">✦</span>NextUp</a><nav><a href="../privacy/">Privacy</a><a href="../support/">Support</a></nav></div></header>
-<main class="content"><p class="eyebrow">Private area</p><h1>Support inbox</h1><section id="login-card" class="card"><p>Sign in with your own NextUp account to access support requests.</p><form id="login-form"><label>Email<input required name="email" type="email" autocomplete="username"></label><label>Password<input required name="password" type="password" autocomplete="current-password"></label><button class="button">Sign in</button><p id="login-result" class="hint" aria-live="polite"></p></form></section><section id="inbox" class="card hidden"><div style="display:flex;justify-content:space-between;gap:16px;align-items:center"><h2 style="margin:0">Messages</h2><button id="sign-out" class="button secondary">Sign out</button></div><p id="inbox-result" class="hint"></p><div id="message-list"></div></section></main>
-<footer class="site-footer"><div class="footer-content"><span>NextUp</span><span>Private support inbox</span></div></footer><script src="../assets/config.js"></script><script type="module">
-import {createClient} from 'https://esm.sh/@supabase/supabase-js@2';const supabase=createClient(NextUpSupportConfig.supabaseUrl,NextUpSupportConfig.publishableKey),loginCard=document.querySelector('#login-card'),inbox=document.querySelector('#inbox'),loginResult=document.querySelector('#login-result'),list=document.querySelector('#message-list'),inboxResult=document.querySelector('#inbox-result');const escape=value=>String(value??'').replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));async function load(){const {data,error}=await supabase.from('support_inbox').select('*').order('created_at',{ascending:false});if(error){inboxResult.textContent='This account is not authorised to view the support inbox.';inboxResult.className='error';return;}inboxResult.textContent=data.length?`${data.length} request${data.length===1?'':'s'}.`:'No support requests yet.';list.innerHTML=data.map(item=>`<article class="inbox-item"><div style="display:flex;justify-content:space-between;gap:12px"><div><h3>${escape(item.subject)}</h3><p class="meta">${escape(item.name)}${item.reply_email?` · ${escape(item.reply_email)`:''} · ${new Date(item.created_at).toLocaleString()}</p></div><select class="status" data-id="${item.id}"><option value="new" ${item.status==='new'?'selected':''}>New</option><option value="in_progress" ${item.status==='in_progress'?'selected':''}>In progress</option><option value="resolved" ${item.status==='resolved'?'selected':''}>Resolved</option></select></div><p class="message">${escape(item.message)}</p>${item.expected_result?`<p><strong>Expected:</strong> ${escape(item.expected_result)}</p>`:''}${item.actual_result?`<p><strong>Actual:</strong> ${escape(item.actual_result)}</p>`:''}${item.error_message?`<p><strong>Error:</strong> ${escape(item.error_message)}</p>`:''}<p class="meta">${escape(item.category)}${item.device_model?` · ${escape(item.device_model)`:''}${item.ios_version?` · ${escape(item.ios_version)`:''}${item.screen?` · ${escape(item.screen)`:''}</p></article>`).join('');document.querySelectorAll('.status').forEach(select=>select.addEventListener('change',async()=>{await supabase.from('support_inbox').update({status:select.value,updated_at:new Date().toISOString()}).eq('id',select.dataset.id);}));}async function session(){const {data:{session}}=await supabase.auth.getSession();if(session){loginCard.classList.add('hidden');inbox.classList.remove('hidden');await load();}}document.querySelector('#login-form').addEventListener('submit',async event=>{event.preventDefault();const values=Object.fromEntries(new FormData(event.target)),{error}=await supabase.auth.signInWithPassword({email:values.email,password:values.password});if(error){loginResult.textContent='Sign-in failed.';loginResult.className='error';return;}await session();});document.querySelector('#sign-out').addEventListener('click',async()=>{await supabase.auth.signOut();inbox.classList.add('hidden');loginCard.classList.remove('hidden');list.innerHTML='';});await session();
-</script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>NextUp Admin</title>
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body class="admin-page">
+  <header class="site-header">
+    <div class="header-content">
+      <a class="brand" href="../"><span class="brand-mark">✦</span>NextUp</a>
+      <span class="admin-label">Administration</span>
+    </div>
+  </header>
+
+  <main class="content admin-content">
+    <section id="login-card" class="admin-login card">
+      <p class="eyebrow">Private area</p>
+      <h1>NextUp Admin</h1>
+      <p class="lead">Sign in with the approved administrator account to view system health, fingerprint processing and support requests.</p>
+      <form id="login-form">
+        <label>Email<input required name="email" type="email" autocomplete="username" placeholder="Approved administrator email"></label>
+        <label>Password<input required name="password" type="password" autocomplete="current-password"></label>
+        <button class="button" type="submit">Sign in</button>
+        <p id="login-result" class="hint" aria-live="polite"></p>
+      </form>
+    </section>
+
+    <section id="dashboard" class="hidden" aria-live="polite">
+      <div class="admin-title-row">
+        <div>
+          <p class="eyebrow">Private dashboard</p>
+          <h1>System overview</h1>
+          <p id="refresh-status" class="hint">Loading…</p>
+        </div>
+        <div class="admin-actions">
+          <button id="refresh" class="button secondary" type="button">Refresh</button>
+          <button id="sign-out" class="button secondary" type="button">Sign out</button>
+        </div>
+      </div>
+
+      <p id="dashboard-error" class="error hidden" role="alert"></p>
+
+      <section aria-labelledby="overview-heading">
+        <h2 id="overview-heading">Fingerprint worker queue</h2>
+        <div id="overview-cards" class="metric-grid"></div>
+      </section>
+
+      <section class="admin-section" aria-labelledby="health-heading">
+        <h2 id="health-heading">System health</h2>
+        <div id="health-card" class="health-card"></div>
+      </section>
+
+      <section class="admin-section" aria-labelledby="queue-heading">
+        <div class="section-title-row">
+          <div>
+            <h2 id="queue-heading">Fingerprint queue</h2>
+            <p id="queue-summary" class="hint">Loading jobs…</p>
+          </div>
+        </div>
+        <div class="filter-row" aria-label="Fingerprint queue filters">
+          <label>Status<select id="job-status"><option value="">All statuses</option><option value="pending">Pending</option><option value="processing">Processing</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="unavailable">Unavailable</option></select></label>
+          <label>Age<select id="job-age"><option value="">Any age</option><option value="30">Pending over 30 minutes</option><option value="60">Older than 1 hour</option><option value="360">Older than 6 hours</option></select></label>
+          <label class="check-label"><input id="job-priority" type="checkbox"> High priority</label>
+          <label class="check-label"><input id="job-retried" type="checkbox"> Retried 3+ times</label>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">TMDB ID</th><th scope="col">Status</th><th scope="col">Priority</th><th scope="col">Attempts</th><th scope="col">Requested</th><th scope="col">Latest activity</th><th scope="col">Error</th></tr></thead>
+            <tbody id="jobs-list"></tbody>
+          </table>
+        </div>
+        <div class="pagination"><button id="jobs-previous" class="button secondary" type="button">Previous</button><span id="jobs-page" class="hint"></span><button id="jobs-next" class="button secondary" type="button">Next</button></div>
+      </section>
+
+      <section class="admin-section" aria-labelledby="support-heading">
+        <div class="section-title-row">
+          <div><h2 id="support-heading">Support requests</h2><p id="support-summary" class="hint">Loading requests…</p></div>
+        </div>
+        <div class="filter-row" aria-label="Support request filters">
+          <label>Status<select id="support-status"><option value="">All statuses</option><option value="new">New</option><option value="in_progress">In progress</option><option value="resolved">Resolved</option></select></label>
+          <label class="search-label">Search<input id="support-search" type="search" placeholder="Subject, message or email"></label>
+        </div>
+        <div id="support-list" class="request-list"></div>
+        <div class="pagination"><button id="support-previous" class="button secondary" type="button">Previous</button><span id="support-page" class="hint"></span><button id="support-next" class="button secondary" type="button">Next</button></div>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="job-detail" class="job-detail">
+    <div class="dialog-header"><h2>Fingerprint detail</h2><button id="close-detail" class="button secondary" type="button">Close</button></div>
+    <div id="job-detail-content"></div>
+  </dialog>
+
+  <footer class="site-footer"><div class="footer-content"><span>NextUp</span><span>Private administration dashboard</span></div></footer>
+
+  <script src="../assets/config.js"></script>
+  <script type="module">
+    import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+    const supabase = createClient(NextUpSupportConfig.supabaseUrl, NextUpSupportConfig.publishableKey, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false }
+    });
+    const state = { jobsPage: 0, jobsTotal: 0, supportPage: 0, supportTotal: 0, refreshTimer: null };
+    const $ = selector => document.querySelector(selector);
+    const loginCard = $('#login-card');
+    const dashboard = $('#dashboard');
+    const errorBanner = $('#dashboard-error');
+    const detailDialog = $('#job-detail');
+    const dateTime = value => value ? new Date(value).toLocaleString() : '—';
+    const age = minutes => minutes === null || minutes === undefined ? 'No pending jobs' : `${minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`}`;
+    const setText = (selector, value) => $(selector).textContent = value;
+    const showError = message => { errorBanner.textContent = message; errorBanner.classList.toggle('hidden', !message); };
+    const statusTag = status => { const tag = document.createElement('span'); tag.className = `status-tag ${String(status || '').replace(/[^a-z_]/g, '')}`; tag.textContent = status || 'Unknown'; return tag; };
+    const text = (value, fallback = '—') => value === null || value === undefined || value === '' ? fallback : String(value);
+
+    async function rpc(name, values = {}) {
+      const { data, error } = await supabase.rpc(name, values);
+      if (error) throw error;
+      return data;
+    }
+
+    function renderOverview(row) {
+      const cards = [
+        ['Pending', row.pending_jobs, 'Waiting to be processed'],
+        ['Processing', row.processing_jobs, 'In progress now'],
+        ['Completed', row.completed_jobs, 'All recorded jobs'],
+        ['Failed', row.failed_jobs, 'Need attention'],
+        ['Last hour', row.completed_last_hour, 'Jobs completed'],
+        ['Oldest pending', age(row.oldest_pending_minutes), row.oldest_pending_at ? dateTime(row.oldest_pending_at) : 'Nothing waiting'],
+        ['Unanswered support', row.unanswered_support_requests, 'New or in progress'],
+        ['Support in 24h', row.support_requests_last_24_hours, 'Recently received']
+      ];
+      const container = $('#overview-cards');
+      container.replaceChildren(...cards.map(([label, value, note]) => {
+        const card = document.createElement('article'); card.className = 'metric-card';
+        const heading = document.createElement('h3'); heading.textContent = label;
+        const number = document.createElement('p'); number.className = 'metric-value'; number.textContent = text(value, '0');
+        const detail = document.createElement('p'); detail.className = 'hint'; detail.textContent = note;
+        card.append(heading, number, detail); return card;
+      }));
+    }
+
+    function renderHealth(row) {
+      const container = $('#health-card'); container.replaceChildren();
+      const items = [
+        ['Database', row.database_status || 'Connected'],
+        ['Last successful worker completion', dateTime(row.last_successful_worker_completion)],
+        ['Last worker failure', dateTime(row.last_worker_failure)],
+        ['Current queue age', age(row.queue_age_minutes)],
+        ['Failed jobs', text(row.failed_jobs, '0')],
+        ['Processing now', text(row.processing_jobs, '0')]
+      ];
+      items.forEach(([label, value]) => { const block = document.createElement('div'); const labelNode = document.createElement('span'); labelNode.textContent = label; const valueNode = document.createElement('strong'); valueNode.textContent = value; block.append(labelNode, valueNode); container.append(block); });
+    }
+
+    function renderJobs(rows) {
+      const body = $('#jobs-list'); body.replaceChildren();
+      state.jobsTotal = Number(rows[0]?.total_count || 0);
+      if (!rows.length) { const row = document.createElement('tr'); const cell = document.createElement('td'); cell.colSpan = 7; cell.textContent = 'No jobs match these filters.'; row.append(cell); body.append(row); }
+      rows.forEach(job => {
+        const row = document.createElement('tr'); row.className = 'selectable-row'; row.tabIndex = 0; row.setAttribute('aria-label', `View TMDB ${job.tmdb_id} fingerprint job details`);
+        const cells = [job.tmdb_id, null, job.priority, job.attempt_count, dateTime(job.requested_at), dateTime(job.completed_at || job.started_at || job.updated_at), job.error_code || '—'];
+        cells.forEach((value, index) => { const cell = document.createElement('td'); if (index === 1) cell.append(statusTag(job.status)); else cell.textContent = text(value); row.append(cell); });
+        const open = () => loadJobDetail(job.id); row.addEventListener('click', open); row.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } }); body.append(row);
+      });
+      const pageCount = Math.max(1, Math.ceil(state.jobsTotal / 50));
+      setText('#jobs-page', `Page ${state.jobsPage + 1} of ${pageCount} · ${state.jobsTotal} jobs`);
+      $('#jobs-previous').disabled = state.jobsPage === 0; $('#jobs-next').disabled = state.jobsPage + 1 >= pageCount;
+      setText('#queue-summary', state.jobsTotal ? `${state.jobsTotal} job${state.jobsTotal === 1 ? '' : 's'} found.` : 'No jobs match these filters.');
+    }
+
+    function addDetailBlock(container, label, value) { const block = document.createElement('div'); block.className = 'detail-item'; const heading = document.createElement('span'); heading.textContent = label; const content = document.createElement('strong'); content.textContent = text(value); block.append(heading, content); container.append(block); }
+    async function loadJobDetail(id) {
+      try {
+        const data = await rpc('admin_fingerprint_job_detail', { p_job_id: id });
+        const container = $('#job-detail-content'); container.replaceChildren();
+        if (!data) { container.textContent = 'This job is no longer available.'; detailDialog.showModal(); return; }
+        const fingerprint = data.fingerprint || {}; const job = data.job || {};
+        const summary = document.createElement('div'); summary.className = 'detail-grid';
+        [['TMDB ID', job.tmdb_id], ['Job status', job.status], ['Priority', job.priority], ['Attempts', job.attempt_count], ['Requested', dateTime(job.requested_at)], ['Last error', job.error_code], ['Fingerprint status', fingerprint.status], ['Usable fingerprint', fingerprint.usable ? 'Yes' : 'No'], ['Attributes', fingerprint.attribute_count], ['Genres', fingerprint.genre_count], ['Themes and keywords', fingerprint.keyword_count], ['Last success', dateTime(fingerprint.last_successful_run)]].forEach(([label, value]) => addDetailBlock(summary, label, value));
+        const availability = document.createElement('pre'); availability.className = 'detail-json'; availability.textContent = JSON.stringify(fingerprint.dimension_availability || {}, null, 2);
+        const availabilityHeading = document.createElement('h3'); availabilityHeading.textContent = 'Dimensions present';
+        const historyHeading = document.createElement('h3'); historyHeading.textContent = 'Recent job history';
+        const history = document.createElement('ul'); history.className = 'history-list';
+        (data.history || []).forEach(item => { const entry = document.createElement('li'); entry.textContent = `${dateTime(item.requested_at)} · ${item.status} · ${item.attempt_count} attempt${item.attempt_count === 1 ? '' : 's'}${item.error_code ? ` · ${item.error_code}` : ''}`; history.append(entry); });
+        if (!history.children.length) { const entry = document.createElement('li'); entry.textContent = 'No previous job history.'; history.append(entry); }
+        container.append(summary, availabilityHeading, availability, historyHeading, history); detailDialog.showModal();
+      } catch (error) { showError(error.message || 'Could not load fingerprint details.'); }
+    }
+
+    function renderSupport(rows) {
+      const list = $('#support-list'); list.replaceChildren(); state.supportTotal = Number(rows[0]?.total_count || 0);
+      if (!rows.length) { const empty = document.createElement('p'); empty.className = 'hint'; empty.textContent = 'No support requests match these filters.'; list.append(empty); }
+      rows.forEach(request => {
+        const card = document.createElement('article'); card.className = 'request-card';
+        const top = document.createElement('div'); top.className = 'request-top'; const title = document.createElement('h3'); title.textContent = request.subject; top.append(title, statusTag(request.status));
+        const meta = document.createElement('p'); meta.className = 'meta'; meta.textContent = `${request.name}${request.reply_email ? ` · ${request.reply_email}` : ''} · ${dateTime(request.created_at)}`;
+        const message = document.createElement('p'); message.className = 'message'; message.textContent = request.message;
+        const context = document.createElement('p'); context.className = 'meta'; context.textContent = [request.category, request.device_model, request.ios_version, request.app_version, request.screen].filter(Boolean).join(' · ');
+        card.append(top, meta, message);
+        [['Expected', request.expected_result], ['Actual', request.actual_result], ['Error', request.error_message], ['Admin note', request.admin_note]].forEach(([label, value]) => { if (value) { const line = document.createElement('p'); const strong = document.createElement('strong'); strong.textContent = `${label}: `; line.append(strong, document.createTextNode(value)); card.append(line); } });
+        if (context.textContent) card.append(context); list.append(card);
+      });
+      const pageCount = Math.max(1, Math.ceil(state.supportTotal / 50));
+      setText('#support-page', `Page ${state.supportPage + 1} of ${pageCount} · ${state.supportTotal} requests`);
+      $('#support-previous').disabled = state.supportPage === 0; $('#support-next').disabled = state.supportPage + 1 >= pageCount;
+      setText('#support-summary', state.supportTotal ? `${state.supportTotal} request${state.supportTotal === 1 ? '' : 's'} found.` : 'No support requests match these filters.');
+    }
+
+    async function loadJobs() { const rows = await rpc('admin_fingerprint_jobs', { p_status: $('#job-status').value || null, p_high_priority: $('#job-priority').checked, p_retried: $('#job-retried').checked, p_stale_minutes: $('#job-age').value ? Number($('#job-age').value) : null, p_page: state.jobsPage, p_page_size: 50 }); renderJobs(rows || []); }
+    async function loadSupport() { const rows = await rpc('admin_support_requests', { p_status: $('#support-status').value || null, p_search: $('#support-search').value || null, p_page: state.supportPage, p_page_size: 50 }); renderSupport(rows || []); }
+    async function refreshDashboard() {
+      try {
+        showError('');
+        const [overview, health] = await Promise.all([rpc('admin_dashboard_overview'), rpc('admin_system_health')]);
+        renderOverview(overview?.[0] || {}); renderHealth(health?.[0] || {});
+        await Promise.all([loadJobs(), loadSupport()]);
+        setText('#refresh-status', `Last refreshed ${new Date().toLocaleTimeString()}. Updates automatically every minute.`);
+      } catch (error) {
+        const unauthorized = /administrator access|required|permission|JWT|session/i.test(error.message || '');
+        if (unauthorized) { await signOut('This account is not authorised to use the NextUp Admin dashboard.'); return; }
+        showError(error.message || 'The dashboard could not refresh. Please try again.');
+      }
+    }
+    function startDashboard() { loginCard.classList.add('hidden'); dashboard.classList.remove('hidden'); clearInterval(state.refreshTimer); refreshDashboard(); state.refreshTimer = setInterval(refreshDashboard, 60000); }
+    async function signOut(message = '') { clearInterval(state.refreshTimer); await supabase.auth.signOut(); dashboard.classList.add('hidden'); loginCard.classList.remove('hidden'); setText('#login-result', message); $('#login-result').className = message ? 'error' : 'hint'; }
+
+    $('#login-form').addEventListener('submit', async event => { event.preventDefault(); const values = Object.fromEntries(new FormData(event.currentTarget)); setText('#login-result', 'Signing in…'); $('#login-result').className = 'hint'; const { error } = await supabase.auth.signInWithPassword({ email: values.email, password: values.password }); if (error) { setText('#login-result', 'Sign-in failed. Please check the approved administrator credentials.'); $('#login-result').className = 'error'; return; } startDashboard(); });
+    $('#sign-out').addEventListener('click', () => signOut()); $('#refresh').addEventListener('click', refreshDashboard); $('#close-detail').addEventListener('click', () => detailDialog.close());
+    [['#job-status', 'change'], ['#job-age', 'change'], ['#job-priority', 'change'], ['#job-retried', 'change']].forEach(([selector, event]) => $(selector).addEventListener(event, () => { state.jobsPage = 0; loadJobs().catch(error => showError(error.message)); }));
+    $('#support-status').addEventListener('change', () => { state.supportPage = 0; loadSupport().catch(error => showError(error.message)); });
+    let searchTimer; $('#support-search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.supportPage = 0; loadSupport().catch(error => showError(error.message)); }, 250); });
+    $('#jobs-previous').addEventListener('click', () => { if (state.jobsPage > 0) { state.jobsPage--; loadJobs().catch(error => showError(error.message)); } }); $('#jobs-next').addEventListener('click', () => { if ((state.jobsPage + 1) * 50 < state.jobsTotal) { state.jobsPage++; loadJobs().catch(error => showError(error.message)); } });
+    $('#support-previous').addEventListener('click', () => { if (state.supportPage > 0) { state.supportPage--; loadSupport().catch(error => showError(error.message)); } }); $('#support-next').addEventListener('click', () => { if ((state.supportPage + 1) * 50 < state.supportTotal) { state.supportPage++; loadSupport().catch(error => showError(error.message)); } });
+    supabase.auth.onAuthStateChange((_event, session) => { if (!session && !loginCard.classList.contains('hidden')) return; if (!session) signOut('Your session has ended. Please sign in again.'); });
+    const { data: { session } } = await supabase.auth.getSession(); if (session) startDashboard();
+  </script>
+</body>
+</html>
