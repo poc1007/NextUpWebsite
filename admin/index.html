@@ -103,7 +103,7 @@
     const supabase = createClient(NextUpSupportConfig.supabaseUrl, NextUpSupportConfig.publishableKey, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false }
     });
-    const state = { jobsPage: 0, jobsTotal: 0, supportPage: 0, supportTotal: 0, refreshTimer: null };
+    const state = { jobsPage: 0, jobsTotal: 0, supportPage: 0, supportTotal: 0, refreshTimer: null, isStarting: false, isSigningOut: false };
     const $ = selector => document.querySelector(selector);
     const loginCard = $('#login-card');
     const dashboard = $('#dashboard');
@@ -220,23 +220,60 @@
         await Promise.all([loadJobs(), loadSupport()]);
         setText('#refresh-status', `Last refreshed ${new Date().toLocaleTimeString()}. Updates automatically every minute.`);
       } catch (error) {
-        const unauthorized = /administrator access|required|permission|JWT|session/i.test(error.message || '');
-        if (unauthorized) { await signOut('This account is not authorised to use the NextUp Admin dashboard.'); return; }
-        showError(error.message || 'The dashboard could not refresh. Please try again.');
+        const message = error.message || 'The dashboard could not refresh. Please try again.';
+        const accessDenied = /administrator access|required|permission denied/i.test(message);
+        if (accessDenied) {
+          showError('This signed-in account is not authorised to use the NextUp Admin dashboard.');
+          return;
+        }
+        showError(message);
       }
     }
-    function startDashboard() { loginCard.classList.add('hidden'); dashboard.classList.remove('hidden'); clearInterval(state.refreshTimer); refreshDashboard(); state.refreshTimer = setInterval(refreshDashboard, 60000); }
-    async function signOut(message = '') { clearInterval(state.refreshTimer); await supabase.auth.signOut(); dashboard.classList.add('hidden'); loginCard.classList.remove('hidden'); setText('#login-result', message); $('#login-result').className = message ? 'error' : 'hint'; }
+    async function startDashboard() {
+      if (state.isStarting) return;
+      state.isStarting = true;
+      try {
+        const { data: { session }, error } = await supabase.auth.getSession();
+        if (error || !session) {
+          dashboard.classList.add('hidden');
+          loginCard.classList.remove('hidden');
+          setText('#login-result', 'Please sign in to continue.');
+          $('#login-result').className = 'hint';
+          return;
+        }
+        loginCard.classList.add('hidden');
+        dashboard.classList.remove('hidden');
+        clearInterval(state.refreshTimer);
+        await refreshDashboard();
+        state.refreshTimer = setInterval(refreshDashboard, 60000);
+      } finally {
+        state.isStarting = false;
+      }
+    }
+    async function signOut(message = '', { remote = true } = {}) {
+      if (state.isSigningOut) return;
+      state.isSigningOut = true;
+      clearInterval(state.refreshTimer);
+      if (remote) await supabase.auth.signOut({ scope: 'local' });
+      dashboard.classList.add('hidden');
+      loginCard.classList.remove('hidden');
+      setText('#login-result', message);
+      $('#login-result').className = message ? 'error' : 'hint';
+      state.isSigningOut = false;
+    }
 
-    $('#login-form').addEventListener('submit', async event => { event.preventDefault(); const values = Object.fromEntries(new FormData(event.currentTarget)); setText('#login-result', 'Signing in…'); $('#login-result').className = 'hint'; const { error } = await supabase.auth.signInWithPassword({ email: values.email, password: values.password }); if (error) { setText('#login-result', 'Sign-in failed. Please check the approved administrator credentials.'); $('#login-result').className = 'error'; return; } startDashboard(); });
+    $('#login-form').addEventListener('submit', async event => { event.preventDefault(); const values = Object.fromEntries(new FormData(event.currentTarget)); setText('#login-result', 'Signing in…'); $('#login-result').className = 'hint'; const { error } = await supabase.auth.signInWithPassword({ email: values.email, password: values.password }); if (error) { setText('#login-result', 'Sign-in failed. Please check the approved administrator credentials.'); $('#login-result').className = 'error'; return; } await startDashboard(); });
     $('#sign-out').addEventListener('click', () => signOut()); $('#refresh').addEventListener('click', refreshDashboard); $('#close-detail').addEventListener('click', () => detailDialog.close());
     [['#job-status', 'change'], ['#job-age', 'change'], ['#job-priority', 'change'], ['#job-retried', 'change']].forEach(([selector, event]) => $(selector).addEventListener(event, () => { state.jobsPage = 0; loadJobs().catch(error => showError(error.message)); }));
     $('#support-status').addEventListener('change', () => { state.supportPage = 0; loadSupport().catch(error => showError(error.message)); });
     let searchTimer; $('#support-search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.supportPage = 0; loadSupport().catch(error => showError(error.message)); }, 250); });
     $('#jobs-previous').addEventListener('click', () => { if (state.jobsPage > 0) { state.jobsPage--; loadJobs().catch(error => showError(error.message)); } }); $('#jobs-next').addEventListener('click', () => { if ((state.jobsPage + 1) * 50 < state.jobsTotal) { state.jobsPage++; loadJobs().catch(error => showError(error.message)); } });
     $('#support-previous').addEventListener('click', () => { if (state.supportPage > 0) { state.supportPage--; loadSupport().catch(error => showError(error.message)); } }); $('#support-next').addEventListener('click', () => { if ((state.supportPage + 1) * 50 < state.supportTotal) { state.supportPage++; loadSupport().catch(error => showError(error.message)); } });
-    supabase.auth.onAuthStateChange((_event, session) => { if (!session && !loginCard.classList.contains('hidden')) return; if (!session) signOut('Your session has ended. Please sign in again.'); });
-    const { data: { session } } = await supabase.auth.getSession(); if (session) startDashboard();
+    supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_OUT' && !state.isSigningOut) signOut('Your session has ended. Please sign in again.', { remote: false });
+      if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && session && dashboard.classList.contains('hidden')) startDashboard();
+    });
+    const { data: { session } } = await supabase.auth.getSession(); if (session) await startDashboard();
   </script>
 </body>
 </html>
